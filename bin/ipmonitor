@@ -1,0 +1,123 @@
+#!/usr/bin/env python3.7
+
+import dns.resolver
+import json
+import argparse
+import subprocess
+import time
+import os
+import signal
+import threading
+
+parser = argparse.ArgumentParser()
+parser.add_argument('-c', help='config')
+args = parser.parse_args()
+
+with open(args.c, 'r') as infile:
+    config = json.load(infile)
+
+state_file = '/var/db/ipmonitor.state'
+pf_table = 'proxylist'
+
+def get_ips(domain):
+    return list(map(lambda r: str(r), dns.resolver.query(domain)))
+
+def pf_flush():
+    subprocess.run(['pfctl', '-q', '-t', pf_table, '-T', 'flush'], check=True)
+
+def pf_add(ip):
+    subprocess.run(['pfctl', '-q', '-t', pf_table, '-T', 'add', ip], check=True)
+
+def pf_remove(ip):
+    subprocess.run(['pfctl', '-q', '-t', pf_table, '-T', 'remove', ip], check=True)
+
+class JsonState:
+
+    def __init__(self):
+        self.state = self._load()
+
+    def _load(self):
+        if os.path.lexists(state_file):
+            with open(state_file, 'r') as infile:
+                state = json.load(infile)
+        else:
+            state = {}
+        return state
+
+    def _save(self, state):
+        data = json.dumps(state)
+        with open(state_file, 'w') as outfile:
+            outfile.write(data)
+
+    def update_domain_ips(self, domain, ips):
+        if not domain in self.state:
+            self.state[domain] = {}
+        for ip in ips:
+            self.state[domain][ip] = time.time() + 3600
+        self._save(self.state)
+
+    def remove_domain(self, domain):
+        del self.state[domain]
+        self._save(self.state)
+
+    def remove_domain_ip(self, domain, ip):
+        del self.state[domain][ip]
+        if len(self.state[domain]) == 0:
+            del self.state[domain]
+        self._save(self.state)
+
+    def get_domains(self):
+        return self.state.keys()
+
+    def get_domain(self, domain):
+        return self.state[domain].items()
+
+finish = threading.Event()
+def on_signal(*args):
+    finish.set()
+signal.signal(signal.SIGINT, on_signal)
+signal.signal(signal.SIGTERM, on_signal)
+
+pf_flush()
+state = JsonState()
+
+# prune old domains that aren't in the list anymore
+for domain in state.get_domains():
+    if not domain in config['domains']:
+        state.remove_domain(domain)
+
+# add anything that is not expired
+for domain in state.get_domains():
+    for (ip, ttl) in state.get_domain(domain):
+        if ttl > time.time():
+            pf_add(ip)
+
+while not finish.is_set():
+    for domain in config['domains']:
+        # listify otherwise it drains the result
+        ips = get_ips(domain)
+        state.update_domain_ips(domain, ips)
+        for ip in ips:
+            pf_add(ip)
+
+    # search for expired records
+    # possible removals because it is possible that
+    # multiple domains may share the same ip
+    possible_removals = {}
+    for domain in state.get_domains():
+        for (ip, ttl) in state.get_domain(domain):
+            if ttl > time.time():
+                possible_removals[ip] = False
+            else:
+                if not ip in possible_removals:
+                    possible_removals[ip] = True
+                    state.remove_domain_ip(domain, ip)
+    for kv in possible_removals.items():
+        ip = kv[0]
+        actually_remove = kv[1]
+        if actually_remove:
+            pf_remove(ip)
+
+    finish.wait(60)
+
+pf_flush()
