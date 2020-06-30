@@ -8,6 +8,7 @@ import time
 import os
 import signal
 import threading
+import logging
 
 state_file = '/var/db/ipmonitor.state'
 proxy_table = 'proxylist'
@@ -121,7 +122,7 @@ def prune_domains(config, state, table):
     to_remove = []
     for domain in state.get_domains(table):
         if not domain in config.get("%s.domains" % table, []):
-            to_remove.add(domain)
+            to_remove.append(domain)
     for domain in to_remove:
         state.remove_domain(table, domain)
 
@@ -143,7 +144,7 @@ parser = argparse.ArgumentParser()
 parser.add_argument('-c', help='config')
 args = parser.parse_args()
 
-config = Config(args.c)
+logging.basicConfig(level=logging.INFO)
 
 finish = threading.Event()
 def on_signal(*args):
@@ -151,17 +152,32 @@ def on_signal(*args):
 signal.signal(signal.SIGINT, on_signal)
 signal.signal(signal.SIGTERM, on_signal)
 
-state = JsonState()
-pft_flush(proxy_table)
-pft_flush(bl_table)
+reload_config = True
+def reload_signal(*args):
+    global reload_config
+    reload_config = True
+signal.signal(signal.SIGUSR1, reload_signal)
 
-prune_domains(config, state, proxy_table)
-prune_domains(config, state, bl_table)
+state = JsonState()
 
 while not finish.is_set():
+    if reload_config:
+        logging.info("reloading config")
+        config = Config(args.c)
+        prune_domains(config, state, proxy_table)
+        prune_domains(config, state, bl_table)
+        pft_flush(proxy_table)
+        pft_flush(bl_table)
+        reload_config = False
+
     process_ips(config, state, proxy_table)
     process_ips(config, state, bl_table)
-    finish.wait(60)
+
+    for i in range(60):
+        if reload_config:
+            break
+        if finish.wait(1):
+            break
 
 pft_flush(proxy_table)
 pft_flush(bl_table)

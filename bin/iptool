@@ -1,0 +1,73 @@
+#!/usr/bin/env python3.7
+
+import argparse
+import json
+import signal
+import os
+
+parser = argparse.ArgumentParser()
+parser.add_argument('-c', help='config')
+parser.add_argument('-t', help='table')
+parser.add_argument('-a', action='append', default=None, help='add domain')
+parser.add_argument('-r', action='append', default=None, help='remove domain')
+parser.add_argument('-s', action='store_true', help='show')
+parser.add_argument('--reload', action='store_true', help='reload')
+args = parser.parse_args()
+
+def get_config_file():
+    config_file = args.c
+    if not config_file:
+        config_file = "%s/.ipmonitor.json" % os.path.expanduser('~')
+    return config_file
+
+def load_config():
+    config_file = get_config_file()
+    with open(config_file, 'r') as infile:
+        config = json.load(infile)
+    return config
+
+def save_config(config):
+    data = json.dumps(config, sort_keys=True, indent=2, separators=(',', ': '))
+    config_file = get_config_file()
+    with open(config_file, 'w') as outfile:
+        outfile.write(data)
+
+def require_table():
+    if not args.t:
+        raise Exception("please specify table")
+    return args.t
+
+if args.a:
+    table = require_table()
+    config = load_config()
+    for domain in args.a:
+        if not table in config:
+            config[table] = {}
+        if not 'domains' in config[table]:
+            config[table]['domains'] = []
+        if not domain in config[table]['domains']:
+            config[table]['domains'].append(domain)
+    save_config(config)
+
+if args.r:
+    table = require_table()
+    config = load_config()
+    for domain in args.r:
+        config[table]['domains'].remove(domain)
+    if len(config[table]['domains']) == 0:
+        del config[table]['domains']
+    if len(config[table]) == 0:
+        del config[table]
+    save_config(config)
+
+if args.s:
+    table = require_table()
+    config = load_config()
+    for domain in config[table]['domains']:
+        print(domain)
+
+# last action since we want to reload from all other actions
+if args.reload:
+    with open('/var/run/ipmonitor.pid.child', 'r') as infile:
+        pid = int(infile.read().strip())
+    os.kill(pid, signal.SIGUSR1)

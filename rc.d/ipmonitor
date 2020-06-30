@@ -9,7 +9,7 @@ name="ipmonitor"
 pidfile="/var/run/ipmonitor.pid"
 command="/usr/sbin/daemon"
 export HOME=/home/drew
-command_args="-c -r -t $name -S -T $name -P $pidfile /home/drew/ipmonitor/bin/ipmonitor -c /home/drew/.ipmonitor.json"
+command_args="-c -r -t $name -S -T $name -P $pidfile -p $pidfile.child /home/drew/ipmonitor/bin/ipmonitor -c /home/drew/.ipmonitor.json"
 
 export PATH=/usr/local/bin:$PATH
 
