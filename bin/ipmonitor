@@ -100,7 +100,18 @@ class JsonState:
     def get_domains(self):
         return self.state.keys()
 
+# TODO use this instead
 async def main():
+    state = JsonState()
+    tables = []
+    try:
+        await _main(state, tables)
+    finally:
+        state.save()
+        for table in tables:
+            pft_flush(table)
+
+async def _main(state, tables):
     parser = argparse.ArgumentParser()
     parser.add_argument('-c', help='config')
     args = parser.parse_args()
@@ -120,19 +131,16 @@ async def main():
         reload_config.set()
     loop.add_signal_handler(signal.SIGUSR1, reload_signal)
     
-    state = JsonState()
-   
     async def tapper_callback(domain, ip):
         domain = domain[:-1]
-        logging.debug("dnstap: %s = %s" % (domain, ip))
         if domain in domains:
+            logging.debug("dnstap: %s = %s" % (domain, ip))
             state.update(domain, [str(ip)])
 
     tapper = dnstap_client.Tapper(tapper_callback)
     asyncio.create_task(tapper.loop())
 
     domains = {}
-    tables = []
     while not finish.is_set():
         if reload_config.is_set():
             logging.debug("reloading config")
@@ -155,7 +163,8 @@ async def main():
                 if not table in new_tables:
                     pft_flush(table)
 
-            tables = new_tables
+            tables.clear()
+            tables.extend(new_tables)
             domains = new_domains
 
             # prune domains from state
@@ -206,11 +215,6 @@ async def main():
                 break
             except asyncio.TimeoutError:
                 pass
-    
-    for table in tables:
-        pft_flush(table)
-
-    state.save()
 
 if __name__ == '__main__':
     asyncio.run(main())
