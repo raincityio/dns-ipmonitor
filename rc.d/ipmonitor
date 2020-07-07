@@ -1,7 +1,6 @@
 #!/bin/sh
 
 # PROVIDE: ipmonitor
-# BEFORE: postfix
 
 . /etc/rc.subr
 
