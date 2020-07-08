@@ -3,6 +3,7 @@
 import sys
 sys.path.append('/home/drew/dnstap/bin')
 
+import re
 import asyncio
 import dns.resolver
 import json
@@ -100,7 +101,6 @@ class JsonState:
     def get_domains(self):
         return self.state.keys()
 
-# TODO use this instead
 async def main():
     state = JsonState()
     tables = []
@@ -215,6 +215,9 @@ async def _main(state, tables):
                 break
             except asyncio.TimeoutError:
                 pass
+
+        # meh, save the state every minute
+        state.save()
 
 if __name__ == '__main__':
     asyncio.run(main())
