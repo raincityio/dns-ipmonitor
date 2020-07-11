@@ -1,0 +1,318 @@
+#!/usr/bin/env python3.7
+
+import sys
+sys.path.append('/home/drew/dnstap/bin')
+
+import re
+import asyncio
+import dns.resolver
+import json
+import argparse
+import subprocess
+import time
+import os
+import signal
+import logging
+import dnstap_client
+
+default_state_file = '/var/db/xipmonitor.state'
+default_config_file = "%s/.xipmonitor.json" % os.path.expanduser('~')
+
+def get_ips(domain):
+    try:
+        return list(map(lambda r: str(r), dns.resolver.query(domain)))
+    except dns.resolver.NXDOMAIN:
+        return []
+
+def pft_flush(table):
+    logging.debug("pft_flush(%s)" % table)
+    subprocess.run(['pfctl', '-q', '-t', table, '-T', 'flush'], check=True)
+
+def pft_add(table, ip):
+    logging.debug("pft_add(%s, %s)" % (table, ip))
+    subprocess.run(['pfctl', '-q', '-t', table, '-T', 'add', ip], check=True)
+
+def pft_remove(table, ip):
+    logging.debug("pft_remove(%s, %s)" % (table, ip))
+    subprocess.run(['pfctl', '-q', '-t', table, '-T', 'delete', ip], check=True)
+
+def pft_list(table):
+    output = subprocess.check_output(['pfctl', '-t', table, '-T', 'show'])
+    ips = set()
+    for line in output.decode('utf-8').split('\n'):
+        line = line.strip()
+        if len(line) > 0:
+            ips.add(line)
+    return ips
+
+class JsonState:
+
+    def __init__(self, state_file):
+        self.state_file = state_file
+        self.state = self._load()
+
+    def _load(self):
+        if os.path.exists(self.state_file):
+            with open(self.state_file, 'r') as infile:
+                state = json.load(infile)
+        else:
+            state = {}
+        for table in state:
+            if not 'regexs' in state[table]:
+                continue
+            regexs = {}
+            for regex in state[table]['regexs']:
+                regexs[re.compile(regex)] = state[table]['regexs'][regex]
+            state[table]['regexs'] = regexs
+        return state
+
+    def save(self):
+        state = {}
+        for table in self.state:
+            state[table] = {}
+            if 'domains' in self.state[table]:
+                state[table]['domains'] = self.state[table]['domains']
+            if 'regexs' in self.state[table]:
+                state[table]['regexs'] = {}
+                for regex in self.state[table]['regexs']:
+                    state[table]['regexs'][str(regex)] = self.state[table]['regexs'][regex]
+        data = json.dumps(state)
+        with open(self.state_file, 'w') as outfile:
+            outfile.write(data)
+
+    def get_tables(self):
+        return list(self.state.keys())
+    
+    def update_domain(self, table, domain, ips):
+        if not table in self.state:
+            self.state[table] = {}
+        if not 'domains' in self.state[table]:
+            self.state[table]['domains'] = {}
+        if not domain in self.state[table]['domains']:
+            self.state[table]['domains'][domain] = {}
+        for ip in ips:
+            self.state[table]['domains'][domain][ip] = time.time() + 3600
+
+    def update_regex(self, table, regex, domain, ips):
+        if not table in self.state:
+            self.state[table] = {}
+        if not 'regexs' in self.state[table]:
+            self.state[table]['regexs'] = {}
+        if not regex in self.state[table]['regexs']:
+            self.state[table]['regexs'][regex] = {}
+        if not domain in self.state[table]['regexs'][regex]:
+            self.state[table]['regexs'][regex][domain] = {}
+        for ip in ips:
+            self.state[table]['regexs'][regex][domain][ip] = time.time() + 3600
+
+    def get_domains(self, table):
+        if not table in self.state:
+            return []
+        if not 'domains' in self.state[table]:
+            return []
+        return list(self.state[table]['domains'].keys())
+
+    def get_regexs(self, table):
+        if not table in self.state:
+            return []
+        if not 'regexs' in self.state[table]:
+            return []
+        return list(self.state[table]['regexs'].keys())
+
+    def remove_regex(self, table, regex):
+        del self.state[table]['regexs'][table]
+        if len(self.state[table]['regexs']) == 0:
+            del self.state[table]['regexs']
+        if len(self.state[table]) == 0:
+            del self.state[table]
+
+    def remove_domain(self, table, domain):
+        del self.state[table]['domains'][domain]
+        if len(self.state[table]['domains']) == 0:
+            del self.state[table]['domains']
+        if len(self.state[table]) == 0:
+            del self.state[table]
+
+    def _get_domains_ips(self, ips, domains):
+        current_time = time.time()
+        domains_to_remove = []
+        for domain in domains:
+            ips_to_remove = []
+            for (ip, ttl) in domains[domain].items():
+                if ttl > current_time:
+                    ips.add(ip)
+                else:
+                    ips_to_remove.append(ip)
+            for ip in ips_to_remove:
+                del domains[domain][ip]
+            if len(domains[domain]) == 0:
+                domains_to_remove.append(domain)
+        for domain in domains_to_remove:
+            del domains[domain]
+
+    def get_ips(self, table):
+        ips = set()
+        if not table in self.state:
+            return ips
+        if 'domains' in self.state[table]:
+            self._get_domains_ips(ips, self.state[table]['domains'])
+            if len(self.state[table]['domains']) == 0:
+                del self.state[table]['domains']
+        if 'regexs' in self.state[table]:
+            regexs_to_remove = []
+            for regex in self.state[table]['regexs']:
+                self._get_domains_ips(ips, self.state[table]['regexs'][regex])
+                if len(self.state[table]['regexs'][regex]) == 0:
+                    regexs_to_remove.append(regex)
+            for regex in regexs_to_remove:
+                del self.state[table]['regexs'][regex]
+            if len(self.state[table]['regexs']) == 0:
+                del self.state[table]['regexs']
+        if len(self.state[table]) == 0:
+            del self.state[table]
+        return ips
+
+class Config:
+
+    def __init__(self, config_file):
+        self.config_file = config_file
+        self.load()
+
+    def load(self):
+        self.tables = []
+        self.domains = {}
+        self.regexs = {}
+        if not os.path.exists(self.config_file):
+            return
+        with open(self.config_file, 'r') as infile:
+            config = json.load(infile)
+        for table in config:
+            self.tables.append(table)
+            self.domains[table] = []
+            self.regexs[table] = []
+            if 'domains' in config[table]:
+                for domain in config[table]['domains']:
+                    self.domains[table].append(domain)
+            if 'regexs' in config[table]:
+                for regex in config[table]['regexs']:
+                    self.regexs[table].append(re.compile(regex))
+
+    def get_tables(self):
+        return self.tables
+
+    def get_domains(self, table):
+        return self.domains[table]
+
+    def get_regexs(self, table):
+        return self.regexs[table]
+
+async def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('-c', default=default_config_file, help='config file')
+    parser.add_argument('-s', default=default_state_file, help='state file')
+    args = parser.parse_args()
+
+    config = Config(args.c)
+    state = JsonState(args.s)
+    try:
+        await _main(config, state)
+    finally:
+        state.save()
+        for table in state.get_tables():
+            pft_flush(table)
+
+async def _main(config, state):
+    logging.basicConfig(level=logging.DEBUG)
+    loop = asyncio.get_event_loop()
+    
+    finish = asyncio.Event()
+    def on_signal(*args):
+        finish.set()
+    loop.add_signal_handler(signal.SIGINT, on_signal)
+    loop.add_signal_handler(signal.SIGTERM, on_signal)
+    
+    reload_config = asyncio.Event()
+    reload_config.set()
+    def reload_signal(*args):
+        reload_config.set()
+    loop.add_signal_handler(signal.SIGUSR1, reload_signal)
+
+    async def tapper_callback(domain, ip):
+        domain = domain[:-1]
+        for table in config.get_tables():
+            if domain in config.get_domains(table):
+                logging.debug("dnstap: %s = %s" % (domain, ip))
+                state.update_domain(table, domain, [str(ip)])
+            for regex in config.get_regexs(table):
+                if regex.match(domain):
+                    logging.debug("dnstap: %s = %s" % (domain, ip))
+                    state.update_regex(table, regex, domain, [str(ip)])
+
+    tapper = dnstap_client.Tapper(tapper_callback)
+    asyncio.create_task(tapper.loop())
+
+    async def update_domains():
+        while True:
+            # update state
+            for table in config.get_tables():
+                for domain in config.get_domains(table):
+                    ips = get_ips(domain)
+                    state.update_domain(table, domain, ips)
+            await asyncio.sleep(5)
+            
+    asyncio.create_task(update_domains())
+
+    async def reload_config_handler():
+        while True:
+            await reload_config.wait()
+            logging.debug("reloading config")
+            config.load()
+
+            # clear irrelviant state
+            config_tables = config.get_tables()
+            tables_to_remove = []
+            for table in state.get_tables():
+                if not table in config_tables:
+                    tables_to_remove.append(table)
+                    continue
+                config_domains = config.get_domains(table)
+                domains_to_remove = []
+                for domain in state.get_domains(table):
+                    if not domain in config_domains:
+                        domains_to_remove.append(domain)
+                for domain in domains_to_remove:
+                    state.remove_domain(table, domain)
+                config_regexs = config.get_regexs(table)
+                regexs_to_remove = []
+                for regex in state.get_regexs(table):
+                    if not regex in config_regexs:
+                        regexs_to_remove.append(domain)
+                for regex in regexs_to_remove:
+                    state.remove_regex(table, regex)
+            for table in tables_to_remove:
+                state.remove_table(table)
+
+            reload_config.clear()
+
+    asyncio.create_task(reload_config_handler())
+
+    while not finish.is_set():
+        for table in state.get_tables():
+            pft_ips = pft_list(table)
+            table_ips = state.get_ips(table)
+            for ip in pft_ips:
+                if not ip in table_ips:
+                    pft_remove(table, ip)
+            for ip in table_ips:
+                if not ip in pft_ips:
+                    pft_add(table, ip)
+        try:
+            await asyncio.wait_for(finish.wait(), 10)
+        except asyncio.TimeoutError:
+            pass
+        state.save()
+
+    state.save()
+
+if __name__ == '__main__':
+    asyncio.run(main())
