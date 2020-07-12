@@ -264,21 +264,14 @@ async def _main(config, state):
                 for domain in config.get_domains(table):
                     ips = get_ips(domain)
                     state.update_domain(table, domain, ips)
-            await asyncio.sleep(default_update_domains_period)
-            
-    asyncio.create_task(update_domains())
-
-    async def update_regexs_domains():
-        while True:
-            for table in state.get_tables():
                 for (domain, regexs) in state.get_regexs_domains(table).items():
                     ips = get_ips(domain)
                     for regex in regexs:
                         state.update_regex(table, regex, domain, ips)
             await asyncio.sleep(default_update_domains_period)
+            
+    asyncio.create_task(update_domains())
 
-    asyncio.create_task(update_regexs_domains())
-    
     async def reload_config_handler():
         while True:
             await reload_config.wait()
