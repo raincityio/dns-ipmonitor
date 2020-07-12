@@ -91,8 +91,12 @@ class JsonState:
         if not domain in table:
             table[domain] = {}
         domain = table[domain]
+        new_ips = []
         for ip in ips:
+            if not ip in domain:
+                new_ips.append(ip)
             domain[ip] = time.time()
+        return new_ips
 
     def get_ips(self, table):
         if not table in self.state:
@@ -178,14 +182,16 @@ async def _main(config, state):
 
     async def tapper_callback(domain, ip):
         domain = domain[:-1]
-        for table in state.get_tables():
+        for table in config.get_tables():
             if domain in state.get_domains(table):
-                logging.debug("dnstap: %s = %s" % (domain, ip))
-                state.update_domain(table, domain, [str(ip)])
+                new_ips = state.update_domain(table, domain, [str(ip)])
+                for new_ip in new_ips:
+                    pft_add(table, new_ip)
             for regex in config.get_regexs(table):
                 if regex.match(domain):
-                    logging.debug("dnstap: %s = %s" % (domain, ip))
-                    state.update_domain(table, domain, [str(ip)])
+                    new_ips = state.update_domain(table, domain, [str(ip)])
+                    for new_ip in new_ips:
+                        pft_add(table, new_ip)
 
     tapper = dnstap_client.Tapper(tapper_callback)
     asyncio.create_task(tapper.loop())
@@ -193,10 +199,12 @@ async def _main(config, state):
     async def update_domains():
         while True:
             # update state
-            for table in state.get_tables():
+            for table in config.get_tables():
                 for domain in state.get_domains(table):
                     ips = get_ips(domain)
-                    state.update_domain(table, domain, ips)
+                    new_ips = state.update_domain(table, domain, ips)
+                    for new_ip in new_ips:
+                        pft_add(table, new_ip)
             await asyncio.sleep(default_update_domains_period)
             
     asyncio.create_task(update_domains())
@@ -209,6 +217,10 @@ async def _main(config, state):
 
             # clear irrelviant state
             tables_to_remove = []
+            for table in config.get_tables():
+                for domain in config.get_domains(table):
+                    state.update_domain(table, domain, [])
+
             for table in state.get_tables():
                 if not table in config.get_tables():
                     tables_to_remove.append(table)
