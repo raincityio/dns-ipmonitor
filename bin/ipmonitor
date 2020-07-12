@@ -84,6 +84,10 @@ class JsonState:
     def remove_table(self, table):
         del self.state[table]
 
+    def add_table(self, table):
+        if not table in self.state:
+            self.state[table] = {}
+
     def update_domain(self, table, domain, ips):
         if not table in self.state:
             self.state[table] = {}
@@ -182,7 +186,7 @@ async def _main(config, state):
 
     async def tapper_callback(domain, ip):
         domain = domain[:-1]
-        for table in config.get_tables():
+        for table in state.get_tables():
             if domain in state.get_domains(table):
                 new_ips = state.update_domain(table, domain, [str(ip)])
                 for new_ip in new_ips:
@@ -199,7 +203,7 @@ async def _main(config, state):
     async def update_domains():
         while True:
             # update state
-            for table in config.get_tables():
+            for table in state.get_tables():
                 for domain in state.get_domains(table):
                     ips = get_ips(domain)
                     new_ips = state.update_domain(table, domain, ips)
@@ -215,18 +219,18 @@ async def _main(config, state):
             logging.debug("reloading config")
             config.load()
 
-            # clear irrelviant state
-            tables_to_remove = []
+            # prime the state
             for table in config.get_tables():
+                state.add_table(table)
                 for domain in config.get_domains(table):
                     state.update_domain(table, domain, [])
 
+            # clear irrelviant state
+            tables_to_remove = []
             for table in state.get_tables():
                 if not table in config.get_tables():
                     tables_to_remove.append(table)
                     continue
-                for domain in config.get_domains(table):
-                    state.update_domain(table, domain, [])
                 domains_to_remove = []
                 for domain in state.get_domains(table):
                     if domain in config.get_domains(table):
