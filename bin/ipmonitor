@@ -19,7 +19,7 @@ default_state_file = '/var/db/ipmonitor.state'
 default_config_file = "%s/.ipmonitor.json" % os.path.expanduser('~')
 
 default_update_domains_period = 5
-default_sync_period = 10
+default_sync_period = 60
 default_ttl = 3600
 
 def get_ips(domain):
@@ -153,6 +153,41 @@ class Config:
     def get_regexs(self, table):
         return self.regexs[table]
 
+def sync_state(config, state):
+    # prime the state
+    for table in config.get_tables():
+        state.add_table(table)
+        for domain in config.get_domains(table):
+            state.update_domain(table, domain, [])
+
+    # clear irrelviant state
+    tables_to_remove = []
+    for table in state.get_tables():
+        if not table in config.get_tables():
+            tables_to_remove.append(table)
+            continue
+        domains_to_remove = []
+        for domain in state.get_domains(table):
+            if domain in config.get_domains(table):
+                continue
+            found = False
+            for regex in config.get_regexs(table):
+                if regex.match(domain):
+                    found = True
+                    break
+            if not found:
+                domains_to_remove.append(domain)
+        for domain in domains_to_remove:
+            state.remove_domain(table, domain)
+    for table in tables_to_remove:
+        state.remove_table(table)
+
+# TODO, should i use this?
+def update_ips(state, table, domain, ips):
+    new_ips = state.update_domain(table, domain, ips)
+    for new_ip in new_ips:
+        pft_add(table, new_ip)
+
 async def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('-c', default=default_config_file, help='config file')
@@ -161,6 +196,7 @@ async def main():
 
     config = Config(args.c)
     state = JsonState(args.s)
+    sync_state(config, state)
     try:
         await _main(config, state)
     finally:
@@ -179,7 +215,6 @@ async def _main(config, state):
     loop.add_signal_handler(signal.SIGTERM, on_signal)
     
     reload_config = asyncio.Event()
-    reload_config.set()
     def reload_signal(*args):
         reload_config.set()
     loop.add_signal_handler(signal.SIGUSR1, reload_signal)
@@ -191,11 +226,12 @@ async def _main(config, state):
                 new_ips = state.update_domain(table, domain, [str(ip)])
                 for new_ip in new_ips:
                     pft_add(table, new_ip)
-            for regex in config.get_regexs(table):
-                if regex.match(domain):
-                    new_ips = state.update_domain(table, domain, [str(ip)])
-                    for new_ip in new_ips:
-                        pft_add(table, new_ip)
+            else:
+                for regex in config.get_regexs(table):
+                    if regex.match(domain):
+                        new_ips = state.update_domain(table, domain, [str(ip)])
+                        for new_ip in new_ips:
+                            pft_add(table, new_ip)
 
     tapper = dnstap_client.Tapper(tapper_callback)
     asyncio.create_task(tapper.loop())
@@ -218,35 +254,7 @@ async def _main(config, state):
             await reload_config.wait()
             logging.debug("reloading config")
             config.load()
-
-            # prime the state
-            for table in config.get_tables():
-                state.add_table(table)
-                for domain in config.get_domains(table):
-                    state.update_domain(table, domain, [])
-
-            # clear irrelviant state
-            tables_to_remove = []
-            for table in state.get_tables():
-                if not table in config.get_tables():
-                    tables_to_remove.append(table)
-                    continue
-                domains_to_remove = []
-                for domain in state.get_domains(table):
-                    if domain in config.get_domains(table):
-                        continue
-                    found = False
-                    for regex in config.get_regexs(table):
-                        if regex.match(domain):
-                            found = True
-                            break
-                    if not found:
-                        domains_to_remove.append(domain)
-                for domain in domains_to_remove:
-                    state.remove_domain(table, domain)
-            for table in tables_to_remove:
-                state.remove_table(table)
-
+            sync_state(config, state)
             reload_config.clear()
 
     asyncio.create_task(reload_config_handler())
