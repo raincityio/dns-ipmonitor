@@ -232,6 +232,7 @@ async def _main(config, state):
                         new_ips = state.update_domain(table, domain, [str(ip)])
                         for new_ip in new_ips:
                             pft_add(table, new_ip)
+                        break
 
     tapper = dnstap_client.Tapper(tapper_callback)
     asyncio.create_task(tapper.loop())
