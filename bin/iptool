@@ -63,8 +63,7 @@ if args.r:
 if args.s:
     table = require_table()
     config = load_config()
-    for domain in config[table]['domains']:
-        print(domain)
+    print(config[table])
 
 # last action since we want to reload from all other actions
 if args.reload:

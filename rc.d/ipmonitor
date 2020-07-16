@@ -4,11 +4,21 @@
 
 . /etc/rc.subr
 
+fail() { echo @$>&2; exit 1; }
+
+if [ -f /usr/local/etc/dnstap.rc ]; then
+  . /usr/local/etc/dnstap.rc
+fi
+
+test -n "$IPMONITOR_HOME" || fail "IPMONITOR_HOME not specified"
+ipmonitor=$IPMONITOR_HOME/bin/ipmonitor
+test -n "$IPMONITOR_CONFIG" || fail "IPMONITOR_CONFIG not specified"
+ipmonitor_config=$IPMONITOR_CONFIG
+
 name="ipmonitor"
 pidfile="/var/run/ipmonitor.pid"
 command="/usr/sbin/daemon"
-export HOME=/home/drew
-command_args="-c -r -t $name -S -T $name -P $pidfile -p $pidfile.child /home/drew/ipmonitor/bin/ipmonitor -c /home/drew/.ipmonitor.json"
+command_args="-c -r -t $name -S -T $name -P $pidfile -p $pidfile.child $ipmonitor -c $ipmonitor_config"
 
 export PATH=/usr/local/bin:$PATH
 
