@@ -6,8 +6,8 @@
 
 fail() { echo @$>&2; exit 1; }
 
-if [ -f /usr/local/etc/dnstap.rc ]; then
-  . /usr/local/etc/dnstap.rc
+if [ -f /usr/local/etc/ipmonitor.rc ]; then
+  . /usr/local/etc/ipmonitor.rc
 fi
 
 test -n "$IPMONITOR_HOME" || fail "IPMONITOR_HOME not specified"
