@@ -1,8 +1,8 @@
 #!/usr/bin/env python3.7
 
+import socket
 import re
 import asyncio
-import dns.resolver
 import json
 import argparse
 import subprocess
@@ -19,31 +19,51 @@ default_update_domains_period = 5
 default_sync_period = 60
 default_ttl = 3600
 
-def get_ips(domain):
+async def get_ips(domain):
     try:
-        return list(map(lambda r: str(r), dns.resolver.query(domain)))
-    except dns.resolver.NXDOMAIN:
+        loop = asyncio.get_event_loop()
+        records = await loop.getaddrinfo(domain, None)
+        ips = []
+        for record in records:
+#            if not record[0] == socket.AF_INET:
+#                continue
+#            if not record[1] == socket.SOCK_STREAM:
+#                continue
+            ips.append(record[4][0])
+        return ips
+    except socket.gaierror:
         return []
 
-def pft_flush(table):
-    logging.debug("pft_flush(%s)" % table)
-    subprocess.run(['pfctl', '-q', '-t', table, '-T', 'flush'], check=True)
+async def pft_execute(table, cmd, *args):
+    cmd_args = ['-q', '-t', table, '-T', cmd]
+    cmd_args.extend(args)
+    logging.debug('pfctl %s' % ' '.join(cmd_args))
+    rc = await (await asyncio.create_subprocess_exec('pfctl', *cmd_args)).wait()
+    if not rc == 0:
+        raise Exception("pfctl failed")
 
-def pft_add(table, ip):
-    logging.debug("pft_add(%s, %s)" % (table, ip))
-    subprocess.run(['pfctl', '-q', '-t', table, '-T', 'add', ip], check=True)
+async def pft_flush(table):
+    await pft_execute(table, 'flush')
 
-def pft_remove(table, ip):
-    logging.debug("pft_remove(%s, %s)" % (table, ip))
-    subprocess.run(['pfctl', '-q', '-t', table, '-T', 'delete', ip], check=True)
+async def pft_add(table, ip):
+    await pft_execute(table, 'add', ip)
 
-def pft_list(table):
-    output = subprocess.check_output(['pfctl', '-t', table, '-T', 'show'])
-    ips = set()
-    for line in output.decode('utf-8').split('\n'):
-        line = line.strip()
-        if len(line) > 0:
-            ips.add(line)
+async def pft_delete(table, ip):
+    await pft_execute(table, 'delete', ip)
+
+async def pft_list(table):
+    proc = await asyncio.create_subprocess_exec('pfctl', '-q', '-t', table, '-T', 'show', stdout=asyncio.subprocess.PIPE)
+    try:
+        ips = []
+        while True:
+            line = await proc.stdout.readline()
+            if len(line) == 0:
+                break
+            ips.append(line.decode('ascii').strip())
+    finally:
+        await proc.wait()
+    if not proc.returncode == 0:
+        raise Exception("pfctl failed")
     return ips
 
 class JsonState:
@@ -180,10 +200,10 @@ def sync_state(config, state):
         state.remove_table(table)
 
 # TODO, should i use this?
-def update_ips(state, table, domain, ips):
+async def update_ips(state, table, domain, ips):
     new_ips = state.update_domain(table, domain, ips)
     for new_ip in new_ips:
-        pft_add(table, new_ip)
+        await pft_add(table, new_ip)
 
 async def main():
     parser = argparse.ArgumentParser()
@@ -199,7 +219,7 @@ async def main():
     finally:
         state.save()
         for table in state.get_tables():
-            pft_flush(table)
+            await pft_flush(table)
 
 async def _main(config, state):
     logging.basicConfig(level=logging.DEBUG)
@@ -222,13 +242,13 @@ async def _main(config, state):
             if domain in state.get_domains(table):
                 new_ips = state.update_domain(table, domain, [str(ip)])
                 for new_ip in new_ips:
-                    pft_add(table, new_ip)
+                    await pft_add(table, new_ip)
             else:
                 for regex in config.get_regexs(table):
                     if regex.match(domain):
                         new_ips = state.update_domain(table, domain, [str(ip)])
                         for new_ip in new_ips:
-                            pft_add(table, new_ip)
+                            await pft_add(table, new_ip)
                         break
 
     tapper = dnstap_client.Tapper(tapper_callback)
@@ -239,10 +259,10 @@ async def _main(config, state):
             # update state
             for table in state.get_tables():
                 for domain in state.get_domains(table):
-                    ips = get_ips(domain)
+                    ips = await get_ips(domain)
                     new_ips = state.update_domain(table, domain, ips)
                     for new_ip in new_ips:
-                        pft_add(table, new_ip)
+                        await pft_add(table, new_ip)
             await asyncio.sleep(default_update_domains_period)
             
     asyncio.create_task(update_domains())
@@ -259,14 +279,14 @@ async def _main(config, state):
 
     while not finish.is_set():
         for table in state.get_tables():
-            pft_ips = pft_list(table)
+            pft_ips = await pft_list(table)
             table_ips = state.get_ips(table)
             for ip in pft_ips:
                 if not ip in table_ips:
-                    pft_remove(table, ip)
+                    await pft_delete(table, ip)
             for ip in table_ips:
                 if not ip in pft_ips:
-                    pft_add(table, ip)
+                    await pft_add(table, ip)
         try:
             await asyncio.wait_for(finish.wait(), default_sync_period)
         except asyncio.TimeoutError:
