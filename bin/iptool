@@ -8,9 +8,13 @@ import os
 parser = argparse.ArgumentParser()
 parser.add_argument('-c', help='config')
 parser.add_argument('-t', help='table')
-parser.add_argument('-a', action='append', default=None, help='add domain')
-parser.add_argument('-r', action='append', default=None, help='remove domain')
-parser.add_argument('-s', action='store_true', help='show')
+parser.add_argument('--add-table', action='store_true', help='add new table')
+parser.add_argument('--remove-table', action='store_true', help='remove table')
+parser.add_argument('-ad', help='add domain')
+parser.add_argument('-rd', help='remove domain')
+parser.add_argument('-ar', help='add regex')
+parser.add_argument('-rr', help='remove regex')
+parser.add_argument('-s', action='store_true', help='show table')
 parser.add_argument('--reload', action='store_true', help='reload')
 args = parser.parse_args()
 
@@ -27,43 +31,77 @@ def load_config():
     return config
 
 def save_config(config):
-    data = json.dumps(config, sort_keys=True, indent=2, separators=(',', ': '))
+    data = json.dumps(config)
     config_file = get_config_file()
     with open(config_file, 'w') as outfile:
         outfile.write(data)
 
 def require_table():
     if not args.t:
-        raise Exception("please specify table")
+        raise Exception("table required")
     return args.t
 
-if args.a:
+if args.add_table:
     table = require_table()
     config = load_config()
-    for domain in args.a:
-        if not table in config:
-            config[table] = {}
-        if not 'domains' in config[table]:
-            config[table]['domains'] = []
-        if not domain in config[table]['domains']:
-            config[table]['domains'].append(domain)
+    if table in config:
+        raise Exception("table already exists: %s" % table)
+    config[table] = {}
     save_config(config)
 
-if args.r:
+if args.remove_table:
     table = require_table()
     config = load_config()
-    for domain in args.r:
-        config[table]['domains'].remove(domain)
-    if len(config[table]['domains']) == 0:
-        del config[table]['domains']
-    if len(config[table]) == 0:
-        del config[table]
+    if not table in config:
+        raise Exception("table not not exist: %s" % table)
+    if not len(config[table]) == 0:
+        raise Exception("will not remove non-empty table: %s" % table)
+    del config[table]
     save_config(config)
+
+def add(key, value):
+    table = require_table()
+    config = load_config()
+    if not table in config:
+        raise Exception("unknown table: %s" % table)
+    if not key in config[table]:
+        config[table][key] = []
+    if not value in config[table][key]:
+        config[table][key].append(value)
+    save_config(config)
+
+if args.ad:
+    add('domains', args.ad)
+
+if args.ar:
+    add('regexs', args.ar)
+
+def remove(key, value):
+    table = require_table()
+    config = load_config()
+    if not table in config:
+        raise Exception("unknown table: %s" % table)
+    if not key in config[table]:
+        raise Exception("unknown value in %s: %s" % (key, value))
+    if not value in config[table][key]:
+        raise Exception("unknown value in %s: %s" % (key, value))
+    config[table][key].remove(value)
+    if len(config[table][key]) == 0:
+        del config[table][key]
+    save_config(config)
+
+if args.rd:
+    remove('domains', args.rd)
+
+if args.rr:
+    remove('regexs', args.rr)
 
 if args.s:
     table = require_table()
     config = load_config()
-    print(config[table])
+    if not table in config:
+        raise Exception("unknown table: %s" % table)
+    print(json.dumps(config[table], sort_keys=True, indent=2, separators=(',', ': ')))
 
 # last action since we want to reload from all other actions
 if args.reload:
