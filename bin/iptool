@@ -31,7 +31,7 @@ def load_config():
     return config
 
 def save_config(config):
-    data = json.dumps(config)
+    data = json.dumps(config, sort_keys=True, indent=2, separators=(',', ': '))
     config_file = get_config_file()
     with open(config_file, 'w') as outfile:
         outfile.write(data)

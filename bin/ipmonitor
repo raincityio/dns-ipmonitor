@@ -23,16 +23,12 @@ async def get_ips(domain):
     try:
         loop = asyncio.get_event_loop()
         records = await loop.getaddrinfo(domain, None)
-        ips = []
+        ips = set()
         for record in records:
-#            if not record[0] == socket.AF_INET:
-#                continue
-#            if not record[1] == socket.SOCK_STREAM:
-#                continue
-            ips.append(record[4][0])
+            ips.add(record[4][0])
         return ips
     except socket.gaierror:
-        return []
+        return set()
 
 async def pft_execute(table, cmd, *args):
     cmd_args = ['-q', '-t', table, '-T', cmd]
@@ -51,15 +47,15 @@ async def pft_add(table, ip):
 async def pft_delete(table, ip):
     await pft_execute(table, 'delete', ip)
 
-async def pft_list(table):
+async def pft_show(table):
     proc = await asyncio.create_subprocess_exec('pfctl', '-q', '-t', table, '-T', 'show', stdout=asyncio.subprocess.PIPE)
     try:
-        ips = []
+        ips = set()
         while True:
             line = await proc.stdout.readline()
             if len(line) == 0:
                 break
-            ips.append(line.decode('ascii').strip())
+            ips.add(line.decode('ascii').strip())
     finally:
         await proc.wait()
     if not proc.returncode == 0:
@@ -91,7 +87,7 @@ class JsonState:
 
     def get_domains(self, table):
         if not table in self.state:
-            return []
+            return set()
         table = self.state[table]
         return table.keys()
 
@@ -112,24 +108,24 @@ class JsonState:
         if not domain in table:
             table[domain] = {}
         domain = table[domain]
-        new_ips = []
+        new_ips = set()
         for ip in ips:
             if not ip in domain:
-                new_ips.append(ip)
+                new_ips.add(ip)
             domain[ip] = time.time()
         return new_ips
 
     def get_ips(self, table):
         if not table in self.state:
-            return []
+            return set()
         table = self.state[table]
-        ips = []
+        ips = set()
         current_time = time.time()
         for domain in table.values():
             to_remove = []
             for (ip, update_time) in domain.items():
                 if (update_time + default_ttl) > current_time:
-                    ips.append(ip)
+                    ips.add(ip)
                 else:
                     to_remove.append(ip)
             for ip in to_remove:
@@ -140,26 +136,35 @@ class Config:
 
     def __init__(self, config_file):
         self.config_file = config_file
-        self.load()
+        self.tables, self.domains, self.regexs = self._load(config_file)
 
-    def load(self):
-        self.tables = []
-        self.domains = {}
-        self.regexs = {}
-        if not os.path.exists(self.config_file):
-            return
-        with open(self.config_file, 'r') as infile:
-            config = json.load(infile)
+    def reload(self):
+        try:
+            self.tables, self.domains, self.regexs = self._load(self.config_file)
+        except Exception as e:
+            logging.error(e)
+
+    @staticmethod
+    def _load(config_file):
+        tables = []
+        domains = {}
+        regexs = {}
+        if os.path.exists(config_file):
+            with open(config_file, 'r') as infile:
+                config = json.load(infile)
+        else:
+            config = {}
         for table in config:
-            self.tables.append(table)
-            self.domains[table] = []
-            self.regexs[table] = []
+            tables.append(table)
+            domains[table] = []
+            regexs[table] = []
             if 'domains' in config[table]:
                 for domain in config[table]['domains']:
-                    self.domains[table].append(domain)
+                    domains[table].append(domain)
             if 'regexs' in config[table]:
                 for regex in config[table]['regexs']:
-                    self.regexs[table].append(re.compile(regex))
+                    regexs[table].append(re.compile(regex))
+        return (tables, domains, regexs,)
 
     def get_tables(self):
         return self.tables
@@ -199,13 +204,18 @@ def sync_state(config, state):
     for table in tables_to_remove:
         state.remove_table(table)
 
-# TODO, should i use this?
-async def update_ips(state, table, domain, ips):
-    new_ips = state.update_domain(table, domain, ips)
-    for new_ip in new_ips:
-        await pft_add(table, new_ip)
+async def sync_tables(state):
+    for table in state.get_tables():
+        pft_ips = await pft_show(table)
+        state_ips = state.get_ips(table)
+        for ip in (pft_ips - state_ips):
+            await pft_delete(table, ip)
+        for ip in (state_ips - pft_ips):
+            await pft_add(table, ip)
 
 async def main():
+    logging.basicConfig(level=logging.DEBUG)
+
     parser = argparse.ArgumentParser()
     parser.add_argument('-c', default=default_config_file, help='config file')
     parser.add_argument('-s', default=default_state_file, help='state file')
@@ -222,7 +232,6 @@ async def main():
             await pft_flush(table)
 
 async def _main(config, state):
-    logging.basicConfig(level=logging.DEBUG)
     loop = asyncio.get_event_loop()
     
     finish = asyncio.Event()
@@ -256,7 +265,6 @@ async def _main(config, state):
 
     async def update_domains():
         while True:
-            # update state
             for table in state.get_tables():
                 for domain in state.get_domains(table):
                     ips = await get_ips(domain)
@@ -271,22 +279,15 @@ async def _main(config, state):
         while True:
             await reload_config.wait()
             logging.debug("reloading config")
-            config.load()
+            config.reload()
             sync_state(config, state)
+            await sync_tables(state)
             reload_config.clear()
 
     asyncio.create_task(reload_config_handler())
 
     while not finish.is_set():
-        for table in state.get_tables():
-            pft_ips = await pft_list(table)
-            table_ips = state.get_ips(table)
-            for ip in pft_ips:
-                if not ip in table_ips:
-                    await pft_delete(table, ip)
-            for ip in table_ips:
-                if not ip in pft_ips:
-                    await pft_add(table, ip)
+        await sync_tables(state)
         try:
             await asyncio.wait_for(finish.wait(), default_sync_period)
         except asyncio.TimeoutError:
