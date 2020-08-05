@@ -1,26 +1,24 @@
 #!/bin/sh
 
+# REQUIRE: NETWORKING ldconfig syslogd dnstap
 # PROVIDE: ipmonitor
 
 . /etc/rc.subr
 
-fail() { echo @$>&2; exit 1; }
+load_rc_config $name
 
-if [ -f /usr/local/etc/ipmonitor.rc ]; then
-  . /usr/local/etc/ipmonitor.rc
-fi
+fail() { echo $@>&2; exit 1; }
 
-test -n "$IPMONITOR_HOME" || fail "IPMONITOR_HOME not specified"
-ipmonitor=$IPMONITOR_HOME/bin/ipmonitor
-test -n "$IPMONITOR_CONFIG" || fail "IPMONITOR_CONFIG not specified"
-ipmonitor_config=$IPMONITOR_CONFIG
+test -n "$dnstap_home" || fail "$dnstap_home not defined"
+export PYTHONPATH=$dnstap_home/bin:$PYTHON_PATH
+test -n "$ipmonitor_home" || fail "ipmonitor_home not specified"
+test -n "$ipmonitor_config" || fail "ipmonitor_config not specified"
 
 name="ipmonitor"
 pidfile="/var/run/ipmonitor.pid"
 command="/usr/sbin/daemon"
-command_args="-c -r -t $name -S -T $name -P $pidfile -p $pidfile.child $ipmonitor -c $ipmonitor_config"
+command_args="-c -r -t $name -S -T $name -P $pidfile -p $pidfile.child $ipmonitor_home/bin/ipmonitor -c $ipmonitor_config"
 
 export PATH=/usr/local/bin:$PATH
 
-load_rc_config $name
 run_rc_command "$1"

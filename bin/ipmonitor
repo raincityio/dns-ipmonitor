@@ -15,7 +15,7 @@ import dnstap_client
 default_state_file = '/var/db/ipmonitor.state'
 default_config_file = "%s/.ipmonitor.json" % os.path.expanduser('~')
 
-default_update_domains_period = 5
+default_update_domains_period = 30
 default_sync_period = 60
 default_ttl = 3600
 
@@ -27,7 +27,8 @@ async def get_ips(domain):
         for record in records:
             ips.add(record[4][0])
         return ips
-    except socket.gaierror:
+    except socket.gaierror as e:
+        logging.error(e)
         return set()
 
 async def pft_execute(table, cmd, *args):
@@ -224,14 +225,7 @@ async def main():
     config = Config(args.c)
     state = JsonState(args.s)
     sync_state(config, state)
-    try:
-        await _main(config, state)
-    finally:
-        state.save()
-        for table in state.get_tables():
-            await pft_flush(table)
 
-async def _main(config, state):
     loop = asyncio.get_event_loop()
     
     finish = asyncio.Event()
@@ -240,10 +234,25 @@ async def _main(config, state):
     loop.add_signal_handler(signal.SIGINT, on_signal)
     loop.add_signal_handler(signal.SIGTERM, on_signal)
     
+    uncaught_exception = None
+    def uncaught_handler(loop, context):
+        nonlocal uncaught_exception
+        if 'exception' in context:
+            uncaught_exception = context['exception']
+        else:
+            uncaught_exception = Exception(context['message'])
+        finish.set()
+    loop.set_exception_handler(uncaught_handler)
+
     reload_config = asyncio.Event()
     def reload_signal(*args):
         reload_config.set()
     loop.add_signal_handler(signal.SIGUSR1, reload_signal)
+
+    def dump_signal(*args):
+        for task in asyncio.all_tasks():
+            logging.info(task)
+    loop.add_signal_handler(signal.SIGUSR2, dump_signal)
 
     async def tapper_callback(domain, ip):
         domain = domain[:-1]
@@ -281,18 +290,32 @@ async def _main(config, state):
             logging.debug("reloading config")
             config.reload()
             sync_state(config, state)
+            state.save()
             await sync_tables(state)
             reload_config.clear()
 
     asyncio.create_task(reload_config_handler())
 
-    while not finish.is_set():
-        await sync_tables(state)
-        try:
-            await asyncio.wait_for(finish.wait(), default_sync_period)
-        except asyncio.TimeoutError:
-            pass
+    async def table_syncer():
+        while True:
+            state.save()
+            await sync_tables(state)
+            await asyncio.sleep(default_sync_period)
+
+    asyncio.create_task(table_syncer())
+
+    try:
+        await finish.wait()
+    finally:
         state.save()
+        # technically, the flush may occur concurrently with
+        # pft_add, so flushing may not get everything
+        # i guess i could surround the asynio.run with a finally
+        # that takes care of this sort of stuff
+        for table in state.get_tables():
+            await pft_flush(table)
+        if not uncaught_exception is None:
+            raise uncaught_exception
 
 if __name__ == '__main__':
     asyncio.run(main())
