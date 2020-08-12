@@ -214,6 +214,14 @@ async def sync_tables(state):
         for ip in (state_ips - pft_ips):
             await pft_add(table, ip)
 
+async def update_domains(state):
+    for table in state.get_tables():
+        for domain in state.get_domains(table):
+            ips = await get_ips(domain)
+            new_ips = state.update_domain(table, domain, ips)
+            for new_ip in new_ips:
+                await pft_add(table, new_ip)
+
 async def main():
     logging.basicConfig(level=logging.DEBUG)
 
@@ -272,17 +280,12 @@ async def main():
     tapper = dnstap_client.Tapper(tapper_callback)
     asyncio.create_task(tapper.loop())
 
-    async def update_domains():
+    async def update_domains_loop():
         while True:
-            for table in state.get_tables():
-                for domain in state.get_domains(table):
-                    ips = await get_ips(domain)
-                    new_ips = state.update_domain(table, domain, ips)
-                    for new_ip in new_ips:
-                        await pft_add(table, new_ip)
+            await update_domains(state)
             await asyncio.sleep(default_update_domains_period)
             
-    asyncio.create_task(update_domains())
+    asyncio.create_task(update_domains_loop())
 
     async def reload_config_handler():
         while True:
@@ -290,7 +293,7 @@ async def main():
             logging.debug("reloading config")
             config.reload()
             sync_state(config, state)
-            state.save()
+            await update_domains(state)
             await sync_tables(state)
             reload_config.clear()
 
